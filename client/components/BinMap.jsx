@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { io } from 'socket.io-client';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import BinPopup from './BinPopup';
@@ -57,16 +58,48 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
 
   const binMarkers = useRef({});
   const truckMarkers = useRef({});
-  const truckAnimFrames = useRef({});
+  const truckAnimIntervalsRef = useRef(new Map());
   const truckStates = useRef({});
+  const truckPositionsRef = useRef({});
+  const lastPositionPostRef = useRef({});
   const collectedRecently = useRef(new Set());
-  const prevCoordsRef = useRef({}); // FIX 1: track previous coords per truck
+  const prevCoordsRef = useRef({});
 
   const binsRef = useRef(bins);
+  const routesRef = useRef(routes);
+  const applyRoutesRef = useRef(null);
+  const socketRef = useRef(null);
+  const startTruckAnimationRef = useRef(() => {});
   useEffect(() => { binsRef.current = bins; }, [bins]);
+  useEffect(() => { routesRef.current = routes; }, [routes]);
 
   const [selectedBin, setSelectedBin] = useState(null);
   const [popupCoords, setPopupCoords] = useState(null);
+
+  // ─── Socket: register ONCE (single useEffect []) ────────────────────
+  useEffect(() => {
+    const s = io(API, { reconnection: true });
+    socketRef.current = s;
+
+    s.on('bin:update', (payload) => {
+      if (payload?.bins) binsRef.current = payload.bins;
+    });
+    s.on('route:update', (payload) => {
+      const nextRoutes = payload?.routes ?? payload;
+      if (nextRoutes) {
+        routesRef.current = nextRoutes;
+        truckAnimIntervalsRef.current.forEach((id) => cancelAnimationFrame(id));
+        truckAnimIntervalsRef.current.clear();
+        applyRoutesRef.current?.();
+      }
+    });
+    s.on('alert:new', () => {});
+
+    return () => {
+      s.disconnect();
+      socketRef.current = null;
+    };
+  }, []);
 
   // ─── Init map ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -123,10 +156,39 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
         });
         if (!features || features.length === 0) setSelectedBin(null);
       });
+
+      applyRoutesRef.current = () => {
+        const tryUpdate = () => {
+          if (!mapLoaded.current) { setTimeout(tryUpdate, 150); return; }
+          const routeMap = routesRef.current || {};
+          if (Object.keys(routeMap).length === 0) return;
+          Object.values(routeMap).forEach((route) => {
+            const truckId = route.truck_id ?? route.truckId;
+            if (!truckId) return;
+            const rawGeo = route.route_geojson ?? route.geojson;
+            if (!rawGeo) return;
+            const geojson = typeof rawGeo === 'string' ? JSON.parse(rawGeo) : rawGeo;
+            const coords = geojson.geometry?.coordinates;
+            if (coords && coords.length > 0 && !truckPositionsRef.current[truckId]) {
+              truckPositionsRef.current[truckId] = { lat: coords[0][1], lng: coords[0][0] };
+            }
+            const sourceId = `route-${truckId}`;
+            if (map.current.getSource(sourceId)) {
+              map.current.getSource(sourceId).setData({
+                type: 'FeatureCollection',
+                features: [geojson],
+              });
+            }
+            startTruckAnimationRef.current?.(truckId, coords);
+          });
+        };
+        tryUpdate();
+      };
     });
 
     return () => {
-      Object.values(truckAnimFrames.current).forEach(cancelAnimationFrame);
+      truckAnimIntervalsRef.current.forEach((id) => cancelAnimationFrame(id));
+      truckAnimIntervalsRef.current.clear();
     };
   }, []);
 
@@ -174,42 +236,49 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
 
   // ─── Truck animation ───────────────────────────────────────────────
   const startTruckAnimation = useCallback((truckId, coords) => {
-    // FIX 2: skip if coords haven't changed — don't reset trucks unnecessarily
     const newCoordsStr = JSON.stringify(coords);
     if (prevCoordsRef.current[truckId] === newCoordsStr) return;
     prevCoordsRef.current[truckId] = newCoordsStr;
 
-    // FIX 3: coords must have at least 2 points — otherwise truck has nowhere to go
     if (!coords || coords.length < 2) {
-      // Stop animation, leave truck where it is
-      if (truckAnimFrames.current[truckId]) {
-        cancelAnimationFrame(truckAnimFrames.current[truckId]);
-        truckAnimFrames.current[truckId] = null;
+      const existing = truckAnimIntervalsRef.current.get(truckId);
+      if (existing) {
+        cancelAnimationFrame(existing);
+        truckAnimIntervalsRef.current.delete(truckId);
       }
       return;
     }
 
-    // FIX 4: find closest point on NEW route to truck's CURRENT position
-    // so truck continues from where it is, not teleporting to route start
+    // BUG 1: clear existing animation before starting
+    const existing = truckAnimIntervalsRef.current.get(truckId);
+    if (existing) {
+      cancelAnimationFrame(existing);
+      truckAnimIntervalsRef.current.delete(truckId);
+    }
+
+    // BUG 2 & 3: start from truck's current position (ref); find nearest bin (skip depot at 0)
+    const pos = truckPositionsRef.current[truckId];
+    const curLat = pos?.lat ?? (coords[0][1]);
+    const curLng = pos?.lng ?? (coords[0][0]);
     let startSegment = 0;
-    if (truckMarkers.current[truckId]) {
-      const currentLngLat = truckMarkers.current[truckId].getLngLat();
-      let closestDist = Infinity;
-      coords.forEach(([lng, lat], i) => {
-        const d = haversine(currentLngLat.lat, currentLngLat.lng, lat, lng);
-        if (d < closestDist) {
-          closestDist = d;
-          startSegment = Math.min(i, coords.length - 2); // don't go past second-to-last
-        }
-      });
+    let startT = 0;
+    let closestDist = Infinity;
+    const binStart = coords.length > 2 ? 1 : 0;
+    for (let i = binStart; i < coords.length; i++) {
+      const d = haversine(curLat, curLng, coords[i][1], coords[i][0]);
+      if (d < closestDist) {
+        closestDist = d;
+        startSegment = Math.min(i, coords.length - 2);
+      }
+    }
+    const [lng1, lat1] = coords[startSegment];
+    const [lng2, lat2] = coords[startSegment + 1];
+    const segDist = haversine(lat1, lng1, lat2, lng2);
+    if (segDist > 1e-6) {
+      const toEnd = haversine(curLat, curLng, lat2, lng2);
+      startT = Math.max(0, Math.min(1, 1 - toEnd / segDist));
     }
 
-    // Cancel previous animation
-    if (truckAnimFrames.current[truckId]) {
-      cancelAnimationFrame(truckAnimFrames.current[truckId]);
-    }
-
-    // Create truck marker if needed
     if (!truckMarkers.current[truckId]) {
       const el = document.createElement('div');
       el.innerHTML = '🚛';
@@ -220,15 +289,16 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
         user-select: none;
       `;
       truckMarkers.current[truckId] = new mapboxgl.Marker({ element: el, anchor: 'center' })
-        .setLngLat(coords[startSegment])
+        .setLngLat([curLng, curLat])
         .addTo(map.current);
+    } else {
+      truckMarkers.current[truckId].setLngLat([curLng, curLat]);
     }
 
-    // Set animation state — start from closest segment, not 0
     truckStates.current[truckId] = {
       coords,
       segmentIndex: startSegment,
-      t: 0,
+      t: startT,
       lastTimestamp: null,
     };
 
@@ -240,18 +310,17 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
       const delta = timestamp - state.lastTimestamp;
       state.lastTimestamp = timestamp;
 
-      const { coords, segmentIndex } = state;
+      const { coords: c, segmentIndex } = state;
 
-      // Loop back to start when route complete
-      if (segmentIndex >= coords.length - 1) {
+      if (segmentIndex >= c.length - 1) {
         state.segmentIndex = 0;
         state.t = 0;
-        truckAnimFrames.current[truckId] = requestAnimationFrame(animate);
+        truckAnimIntervalsRef.current.set(truckId, requestAnimationFrame(animate));
         return;
       }
 
-      const [lng1, lat1] = coords[segmentIndex];
-      const [lng2, lat2] = coords[segmentIndex + 1];
+      const [lng1, lat1] = c[segmentIndex];
+      const [lng2, lat2] = c[segmentIndex + 1];
 
       const segmentDist = haversine(lat1, lng1, lat2, lng2);
       const distThisFrame = TRUCK_SPEED_KM_PER_MS * delta;
@@ -267,61 +336,51 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
       const lng = lng1 + (lng2 - lng1) * clampedT;
       const lat = lat1 + (lat2 - lat1) * clampedT;
 
+      truckPositionsRef.current[truckId] = { lat, lng };
+      const now = Date.now();
+      if (!lastPositionPostRef.current[truckId] || now - lastPositionPostRef.current[truckId] > 500) {
+        lastPositionPostRef.current[truckId] = now;
+        fetch(`${API}/api/trucks/${truckId}/position`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lat, lng }),
+        }).catch(() => {});
+      }
+
       const angle = Math.atan2(lng2 - lng1, lat2 - lat1) * (180 / Math.PI);
       const el = truckMarkers.current[truckId]?.getElement();
       if (el) el.style.transform = `rotate(${angle}deg)`;
 
       truckMarkers.current[truckId]?.setLngLat([lng, lat]);
 
-      // Collect nearby bins
       binsRef.current.forEach((bin) => {
         const fl = Number(bin.fill_level ?? 0);
         if (fl <= 5 || collectedRecently.current.has(bin.id)) return;
-        const dist = haversine(lat, lng, parseFloat(bin.lat), parseFloat(bin.lng));
-        if (dist < 0.15) {
+        const d = haversine(lat, lng, parseFloat(bin.lat), parseFloat(bin.lng));
+        if (d < 0.15) {
           collectedRecently.current.add(bin.id);
           fetch(`${API}/api/bins/${bin.id}/collected`, { method: 'POST' }).catch(() => {});
           setTimeout(() => collectedRecently.current.delete(bin.id), 60000);
         }
       });
 
-      truckAnimFrames.current[truckId] = requestAnimationFrame(animate);
+      truckAnimIntervalsRef.current.set(truckId, requestAnimationFrame(animate));
     };
 
-    truckAnimFrames.current[truckId] = requestAnimationFrame(animate);
+    truckAnimIntervalsRef.current.set(truckId, requestAnimationFrame(animate));
   }, []);
 
-  // ─── Update routes ─────────────────────────────────────────────────
   useEffect(() => {
-    if (!map.current || Object.keys(routes).length === 0) return;
+    startTruckAnimationRef.current = startTruckAnimation;
+  }, [startTruckAnimation]);
 
-    const tryUpdate = () => {
-      if (!mapLoaded.current) { setTimeout(tryUpdate, 150); return; }
+  // Apply routes when routes prop changes (e.g. initial load)
+  useEffect(() => {
+    routesRef.current = routes;
+    applyRoutesRef.current?.();
+  }, [routes]);
 
-      Object.values(routes).forEach((route) => {
-        const truckId = route.truck_id ?? route.truckId;
-        if (!truckId) return;
-
-        const rawGeo = route.route_geojson ?? route.geojson;
-        if (!rawGeo) return;
-
-        const geojson = typeof rawGeo === 'string' ? JSON.parse(rawGeo) : rawGeo;
-        const sourceId = `route-${truckId}`;
-
-        if (map.current.getSource(sourceId)) {
-          map.current.getSource(sourceId).setData({
-            type: 'FeatureCollection',
-            features: [geojson],
-          });
-        }
-
-        const coords = geojson.geometry?.coordinates;
-        startTruckAnimation(truckId, coords);
-      });
-    };
-
-    tryUpdate();
-  }, [routes, startTruckAnimation]);
+  // ─── Update routes (no listener here; socket + applyRoutesRef handle route:update) ───
 
   // ─── Reports layer ─────────────────────────────────────────────────
   useEffect(() => {

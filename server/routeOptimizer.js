@@ -54,7 +54,7 @@ function baselineDistance(startLat, startLng, bins) {
   return dist;
 }
 
-async function optimizeRoutes(db = { query }) {
+async function optimizeRoutes(db = { query }, truckPositions) {
   const trucksRes = await db.query('SELECT * FROM trucks ORDER BY id');
   const trucks = trucksRes.rows;
   if (trucks.length === 0) return null;
@@ -64,6 +64,10 @@ async function optimizeRoutes(db = { query }) {
   let baselineTotal = 0;
 
   for (const truck of trucks) {
+    const pos = truckPositions && truckPositions[truck.id];
+    const startLat = pos ? Number(pos.lat) : parseFloat(truck.current_lat);
+    const startLng = pos ? Number(pos.lng) : parseFloat(truck.current_lng);
+
     // ZONE-LOCKED: each truck only handles bins from its own zone
     const binsRes = await db.query(
       `SELECT * FROM bins 
@@ -74,9 +78,6 @@ async function optimizeRoutes(db = { query }) {
       [truck.assigned_zone]
     );
     const bins = binsRes.rows;
-
-    const startLat = parseFloat(truck.current_lat);
-    const startLng = parseFloat(truck.current_lng);
 
     if (bins.length === 0) {
       // No bins to collect — truck stays at depot, empty route

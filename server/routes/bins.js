@@ -5,9 +5,13 @@ const { optimizeRoutes } = require('../routeOptimizer');
 const { getLatestStatsObject } = require('../statsService');
 
 let io;
+let liveTruckPositionsRef = null;
 const setIO = socketIo => {
   io = socketIo;
 };
+function setLiveTruckPositions(ref) {
+  liveTruckPositionsRef = ref;
+}
 
 // GET all bins
 router.get('/', async (req, res) => {
@@ -49,7 +53,7 @@ router.post('/:id/override', async (req, res) => {
     const bins = (await query('SELECT * FROM bins')).rows;
     if (io) io.emit('bin:update', { bins });
 
-    const result = await optimizeRoutes(db);
+    const result = await optimizeRoutes(db, liveTruckPositionsRef || undefined);
     if (result && io) {
       io.emit('route:update', { routes: result.routes });
 
@@ -123,4 +127,4 @@ router.post('/:id/collected', async (req, res) => {
   }
 });
 
-module.exports = { router, setIO };
+module.exports = { router, setIO, setLiveTruckPositions };

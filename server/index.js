@@ -6,8 +6,8 @@ const cors = require('cors');
 const db = require('./db');
 const { startSimulator } = require('./simulator');
 const { optimizeRoutes } = require('./routeOptimizer');
-const { router: binsRouter, setIO: setBinsIO } = require('./routes/bins');
-const trucksRouter = require('./routes/trucks');
+const { router: binsRouter, setIO: setBinsIO, setLiveTruckPositions: setBinsLiveTruckPositions } = require('./routes/bins');
+const { router: trucksRouter, setLiveTruckPositions } = require('./routes/trucks');
 const { router: reportsRouter, setIO: setReportsIO } = require('./routes/reports');
 const statsRouter = require('./routes/stats');
 const predictRouter = require('./routes/predict');
@@ -54,9 +54,13 @@ io.on('connection', socket => {
 setBinsIO(io);
 setReportsIO(io);
 
+const liveTruckPositions = {};
+setLiveTruckPositions(liveTruckPositions);
+setBinsLiveTruckPositions(liveTruckPositions);
+
 async function start() {
   // Initial route optimization on startup
-  const result = await optimizeRoutes(db);
+  const result = await optimizeRoutes(db, liveTruckPositions);
   if (result) {
     console.log(
       `✅ Initial routes: ${result.optimizedTotal.toFixed(
@@ -64,7 +68,7 @@ async function start() {
       )}km optimized vs ${result.baselineTotal.toFixed(1)}km baseline`
     );
   }
-  startSimulator(io);
+  startSimulator(io, liveTruckPositions);
   const port = process.env.PORT || 3001;
   server.listen(port, () =>
     console.log(`✅ SwachhGrid server on port ${port}`)

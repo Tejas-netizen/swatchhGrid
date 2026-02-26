@@ -6,6 +6,7 @@ const db = require('./db');
 
 let tickCount = 0;
 let io;
+let liveTruckPositions = {};
 
 async function tick() {
   tickCount++;
@@ -101,7 +102,7 @@ async function tick() {
 
   // Re-optimize if any bin crossed 80%
   if (thresholdCrossed.length > 0) {
-    const result = await optimizeRoutes(db);
+    const result = await optimizeRoutes(db, liveTruckPositions);
     if (result) {
       io.emit('route:update', { routes: result.routes });
       if (result.stats) io.emit('stats:update', result.stats);
@@ -119,8 +120,9 @@ async function tick() {
   }
 }
 
-function startSimulator(socketIo) {
+function startSimulator(socketIo, truckPositionsRef) {
   io = socketIo;
+  if (truckPositionsRef) liveTruckPositions = truckPositionsRef;
   cron.schedule('*/30 * * * * *', tick);
   console.log('✅ Simulator started (30s interval)');
 }
