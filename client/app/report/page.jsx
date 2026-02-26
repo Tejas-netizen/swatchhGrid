@@ -78,21 +78,33 @@ export default function ReportPage() {
   if (submitStatus === 'done') {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-        <div className="text-center">
+        <div className="text-center max-w-sm">
           <div className="text-6xl mb-4">✅</div>
           <h2 className="text-white text-2xl font-bold mb-2">
-            Report Submitted
+            Report submitted!
           </h2>
-          <p className="text-gray-400 mb-6">
-            Our team has been notified. The issue is now visible on the live
-            map.
+          <p className="text-gray-400 mb-8">
+            Nearest truck notified.
           </p>
-          <Link
-            href="/"
-            className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-500"
-          >
-            Back to Live Map
-          </Link>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <button
+              onClick={() => {
+                setSubmitStatus('idle');
+                setForm({ issueType: 'overflow', description: '', lat: null, lng: null });
+                setPhoto(null);
+                setLocStatus('idle');
+              }}
+              className="bg-orange-600 hover:bg-orange-500 text-white px-6 py-3 rounded-lg font-semibold transition-colors"
+            >
+              Report Another
+            </button>
+            <Link
+              href="/"
+              className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold transition-colors inline-block"
+            >
+              ← Back to Map
+            </Link>
+          </div>
         </div>
       </div>
     );

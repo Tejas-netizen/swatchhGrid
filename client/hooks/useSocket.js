@@ -4,6 +4,7 @@ import { io } from 'socket.io-client';
 
 export default function useSocket() {
   const [bins, setBins] = useState([]);
+  const [trucks, setTrucks] = useState([]);
   const [routes, setRoutes] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [reports, setReports] = useState([]);
@@ -21,7 +22,13 @@ export default function useSocket() {
     });
     const s = socketRef.current;
 
-    s.on('bin:update', ({ bins }) => setBins(bins));
+    s.on('bin:update', (payload) => {
+      if (payload.bins) setBins(payload.bins);
+      if (payload.trucks) setTrucks(payload.trucks);
+    });
+    s.on('truck:update', ({ trucks }) => {
+      if (trucks) setTrucks(trucks);
+    });
     s.on('route:update', ({ routes }) => setRoutes(routes));
     s.on('alert:new', (alert) =>
       setAlerts((prev) => [alert, ...prev].slice(0, 20)),
@@ -35,6 +42,9 @@ export default function useSocket() {
     fetch(`${process.env.NEXT_PUBLIC_SOCKET_URL}/api/bins`)
       .then((r) => r.json())
       .then(setBins);
+    fetch(`${process.env.NEXT_PUBLIC_SOCKET_URL}/api/trucks`)
+      .then((r) => r.json())
+      .then(setTrucks);
     fetch(`${process.env.NEXT_PUBLIC_SOCKET_URL}/api/trucks/routes`)
       .then((r) => r.json())
       .then((data) => {
@@ -67,6 +77,6 @@ export default function useSocket() {
     );
   };
 
-  return { bins, routes, alerts, reports, stats, overrideBin };
+  return { bins, trucks, routes, alerts, reports, stats, overrideBin };
 }
 

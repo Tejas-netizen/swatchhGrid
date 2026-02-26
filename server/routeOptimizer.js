@@ -152,9 +152,12 @@ async function optimizeRoutes(db = { query }) {
     ]
   );
 
+  const getLatestStatsObject = require('./statsService').getLatestStatsObject;
+  const stats = await getLatestStatsObject(db);
+
   console.log(`✅ Routes optimized | Baseline: ${baselineTotal.toFixed(1)}km | Optimized: ${optimizedTotal.toFixed(1)}km | Fuel saved: ${fuelSaved.toFixed(1)}%`);
 
-  return { routes, optimizedTotal, baselineTotal, co2Saved, fuelSaved };
+  return { routes, optimizedTotal, baselineTotal, co2Saved, fuelSaved, stats };
 }
 
 module.exports = { optimizeRoutes, haversine };

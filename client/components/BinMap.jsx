@@ -8,7 +8,7 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
 const API = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
 const TRUCK_COLORS = { 1: '#3b82f6', 2: '#f59e0b', 3: '#8b5cf6' };
-const TRUCK_SPEED_KM_PER_MS = 0.45 / 3600; // 40 km/h in km/ms
+const TRUCK_SPEED_KM_PER_MS = 0.45 / 3600;
 
 function haversine(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -57,9 +57,10 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
 
   const binMarkers = useRef({});
   const truckMarkers = useRef({});
-  const truckAnimFrames = useRef({});   // requestAnimationFrame IDs
-  const truckStates = useRef({});       // per-truck animation state
+  const truckAnimFrames = useRef({});
+  const truckStates = useRef({});
   const collectedRecently = useRef(new Set());
+  const prevCoordsRef = useRef({}); // FIX 1: track previous coords per truck
 
   const binsRef = useRef(bins);
   useEffect(() => { binsRef.current = bins; }, [bins]);
@@ -73,7 +74,7 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
 
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: 'mapbox://styles/mapbox/light-v11',
       center: [73.8567, 18.5204],
       zoom: 11.5,
     });
@@ -171,14 +172,44 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
     tryUpdate();
   }, [bins]);
 
-  // ─── Smooth truck animation (Swiggy-style) ─────────────────────────
+  // ─── Truck animation ───────────────────────────────────────────────
   const startTruckAnimation = useCallback((truckId, coords) => {
-    // Cancel any existing animation for this truck
+    // FIX 2: skip if coords haven't changed — don't reset trucks unnecessarily
+    const newCoordsStr = JSON.stringify(coords);
+    if (prevCoordsRef.current[truckId] === newCoordsStr) return;
+    prevCoordsRef.current[truckId] = newCoordsStr;
+
+    // FIX 3: coords must have at least 2 points — otherwise truck has nowhere to go
+    if (!coords || coords.length < 2) {
+      // Stop animation, leave truck where it is
+      if (truckAnimFrames.current[truckId]) {
+        cancelAnimationFrame(truckAnimFrames.current[truckId]);
+        truckAnimFrames.current[truckId] = null;
+      }
+      return;
+    }
+
+    // FIX 4: find closest point on NEW route to truck's CURRENT position
+    // so truck continues from where it is, not teleporting to route start
+    let startSegment = 0;
+    if (truckMarkers.current[truckId]) {
+      const currentLngLat = truckMarkers.current[truckId].getLngLat();
+      let closestDist = Infinity;
+      coords.forEach(([lng, lat], i) => {
+        const d = haversine(currentLngLat.lat, currentLngLat.lng, lat, lng);
+        if (d < closestDist) {
+          closestDist = d;
+          startSegment = Math.min(i, coords.length - 2); // don't go past second-to-last
+        }
+      });
+    }
+
+    // Cancel previous animation
     if (truckAnimFrames.current[truckId]) {
       cancelAnimationFrame(truckAnimFrames.current[truckId]);
     }
 
-    // Create truck marker if not exists
+    // Create truck marker if needed
     if (!truckMarkers.current[truckId]) {
       const el = document.createElement('div');
       el.innerHTML = '🚛';
@@ -187,20 +218,17 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
         cursor: default;
         filter: drop-shadow(0 2px 6px rgba(0,0,0,0.8));
         user-select: none;
-        transition: transform 0.1s ease;
       `;
       truckMarkers.current[truckId] = new mapboxgl.Marker({ element: el, anchor: 'center' })
-        .setLngLat(coords[0])
+        .setLngLat(coords[startSegment])
         .addTo(map.current);
-    } else {
-      truckMarkers.current[truckId].setLngLat(coords[0]);
     }
 
-    // Animation state for this truck
+    // Set animation state — start from closest segment, not 0
     truckStates.current[truckId] = {
       coords,
-      segmentIndex: 0,
-      t: 0,           // 0→1 progress through current segment
+      segmentIndex: startSegment,
+      t: 0,
       lastTimestamp: null,
     };
 
@@ -209,12 +237,12 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
       if (!state || !map.current) return;
 
       if (!state.lastTimestamp) state.lastTimestamp = timestamp;
-      const delta = timestamp - state.lastTimestamp; // ms since last frame
+      const delta = timestamp - state.lastTimestamp;
       state.lastTimestamp = timestamp;
 
       const { coords, segmentIndex } = state;
 
-      // If we've looped all segments, restart from beginning
+      // Loop back to start when route complete
       if (segmentIndex >= coords.length - 1) {
         state.segmentIndex = 0;
         state.t = 0;
@@ -225,35 +253,27 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
       const [lng1, lat1] = coords[segmentIndex];
       const [lng2, lat2] = coords[segmentIndex + 1];
 
-      // Distance of this segment in km
       const segmentDist = haversine(lat1, lng1, lat2, lng2);
-
-      // How far did we travel this frame in km?
       const distThisFrame = TRUCK_SPEED_KM_PER_MS * delta;
-
-      // Advance t proportionally
       const increment = segmentDist > 0 ? distThisFrame / segmentDist : 1;
       state.t += increment;
 
       if (state.t >= 1) {
-        // Move to next segment
         state.t = 0;
         state.segmentIndex = segmentIndex + 1;
       }
 
-      // Interpolate position
       const clampedT = Math.min(state.t, 1);
       const lng = lng1 + (lng2 - lng1) * clampedT;
       const lat = lat1 + (lat2 - lat1) * clampedT;
 
-      // Rotate truck emoji to face direction of travel
       const angle = Math.atan2(lng2 - lng1, lat2 - lat1) * (180 / Math.PI);
       const el = truckMarkers.current[truckId]?.getElement();
       if (el) el.style.transform = `rotate(${angle}deg)`;
 
       truckMarkers.current[truckId]?.setLngLat([lng, lat]);
 
-      // Check bin proximity → collect
+      // Collect nearby bins
       binsRef.current.forEach((bin) => {
         const fl = Number(bin.fill_level ?? 0);
         if (fl <= 5 || collectedRecently.current.has(bin.id)) return;
@@ -271,7 +291,7 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
     truckAnimFrames.current[truckId] = requestAnimationFrame(animate);
   }, []);
 
-  // ─── Update routes + restart truck animations ──────────────────────
+  // ─── Update routes ─────────────────────────────────────────────────
   useEffect(() => {
     if (!map.current || Object.keys(routes).length === 0) return;
 
@@ -296,9 +316,7 @@ export default function BinMap({ bins, routes, reports, overrideBin }) {
         }
 
         const coords = geojson.geometry?.coordinates;
-        if (coords && coords.length >= 2) {
-          startTruckAnimation(truckId, coords);
-        }
+        startTruckAnimation(truckId, coords);
       });
     };
 
