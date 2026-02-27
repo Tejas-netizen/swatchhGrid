@@ -14,15 +14,38 @@ const predictRouter = require('./routes/predict');
 
 const app = express();
 const server = http.createServer(app);
-const ALLOWED_ORIGINS = process.env.FRONTEND_URL
-  ? [process.env.FRONTEND_URL, 'http://localhost:3000']
-  : ['http://localhost:3000'];
+// Dynamic CORS origin to support Vercel preview URLs
+const allowedOrigins = (origin, callback) => {
+  if (!origin) return callback(null, true); // Allow non-browser clients
+
+  // Allow localhost
+  if (origin.startsWith('http://localhost:')) {
+    return callback(null, true);
+  }
+
+  // Allow any Vercel URL
+  if (origin.endsWith('.vercel.app')) {
+    return callback(null, true);
+  }
+
+  // Allow Render URL (just in case)
+  if (origin.endsWith('.onrender.com')) {
+    return callback(null, true);
+  }
+
+  // Also check explicit FRONTEND_URL env if provided
+  if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
+    return callback(null, true);
+  }
+
+  callback(new Error('Not allowed by CORS'));
+};
 
 const io = new Server(server, {
-  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'] }
+  cors: { origin: allowedOrigins, methods: ['GET', 'POST'] }
 });
 
-app.use(cors({ origin: ALLOWED_ORIGINS }));
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '10mb' })); // large limit for base64 photos
 
 app.get('/', (req, res) => {
