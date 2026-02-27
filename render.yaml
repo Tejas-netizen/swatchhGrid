@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: swachhgrid-backend
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false        # set manually in Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false        # set manually in Render dashboard
+      - key: FRONTEND_URL
+        sync: false        # set to your Vercel URL, e.g. https://swachhgrid.vercel.app

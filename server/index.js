@@ -14,11 +14,15 @@ const predictRouter = require('./routes/predict');
 
 const app = express();
 const server = http.createServer(app);
+const ALLOWED_ORIGINS = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL, 'http://localhost:3000']
+  : ['http://localhost:3000'];
+
 const io = new Server(server, {
-  cors: { origin: 'http://localhost:3000', methods: ['GET', 'POST'] }
+  cors: { origin: ALLOWED_ORIGINS, methods: ['GET', 'POST'] }
 });
 
-app.use(cors({ origin: 'http://localhost:3000' }));
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json({ limit: '10mb' })); // large limit for base64 photos
 
 app.get('/', (req, res) => {
